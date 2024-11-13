@@ -63,7 +63,7 @@ if ((${#apt_keys[@]} > 0)); then
     if [[ "$key" =~ -- ]]; then
       sudo apt-key adv "$key"
     else
-      wget -q0- "$key" | sudo apt-get add -
+      wget -qO- "$key" | sudo apt-get add -
     fi && echo "$key" >>"$keys_cache"
   done
 fi

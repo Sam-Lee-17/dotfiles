@@ -374,7 +374,7 @@ function config_do() {
 function do_stuff() {
   local base dest skip
   local files=("$DOTFILES/$1/*")
-  [[ $(declare -f "$1_files") ]] && mapfile -t files < <("$1"_files "${files[@]}")
+  [[ $(declare -f "$1_files") ]] && mapfile -t files < <("$1_files" "${files[@]}")
   if ((${#files[@]} == 0)); then
     return
   fi
@@ -482,7 +482,7 @@ fi
 
 if [[ ! -d $DOTFILES ]]; then
   e_header "Downloading dotfiles"
-  git clone --branch "${DOTFILES_GH_BRANCH:-master}" --recursive git://github.com/"${DOTFILES_GH_USER:-sam-lee-17}"/dotfiles.git $DOTFILES
+  git clone --branch "${DOTFILES_GH_BRANCH:-main}" --recursive https://github.com/"${DOTFILES_GH_USER:-Sam-Lee-17}"/dotfiles.git $DOTFILES
   cd $DOTFILES || exit
 elif [[ "$1" != "restart" ]]; then
   e_header "Updating dotfiles"
