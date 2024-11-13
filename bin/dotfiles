@@ -1,0 +1,523 @@
+#!/usr/bin/env bash
+
+# Logging
+function e_header() { echo -e "\n\033[1m$0\033[0m"; }
+function e_success() { echo -e " \033[1;32m✔\033[0m  $*"; }
+function e_error() { echo -e " \033[1;31m✖\033[0m $*"; }
+function e_arrow() { echo -e " \033[1;34m➜\033[0m $*"; }
+
+function print_help() {
+  cat <<HELP
+
+Usage: $(basename "$0")  
+
+See the README for documentation
+https://github.com/Sam-Lee-17/dotfiles
+
+Copright (c) 2024 Sam Lee
+Licensed under the MIT license.
+HELP
+}
+
+type=
+while [ $# -gt 0 ]; do
+  case "$1" in
+  --type* | -t*)
+    if [[ "$1" != *=* ]]; then shift; fi
+    type="${1#*=}"
+    ;;
+  --help | -h)
+    print_help "$0"
+    exit
+    ;;
+  *)
+    e_error >&2 "Invalid arguments\n"
+    exit 1
+    ;;
+  esac
+  shift
+done
+
+[[ "$type" == "source" ]] ||
+  echo 'Dotfiles - Sam Lee'
+
+#############################################
+# General Purpose Exported Vars / Functions #
+#############################################
+
+export DOTFILES=~/.dotfiles
+
+function assert() {
+  local success modes equals result
+  modes=(e_error e_success)
+  equals=("!=" "==")
+  [[ "$1" == "$2" ]] && success=1 || success=0
+  if [[ "$(echo "$1" | wc -l)" != 1 || "$(echo "$2" | wc -l)" != 1 ]]; then
+    result="$(diff <(echo "$1") <(echo "$2") | sed '
+      s/^\([^<>-].*\)/===[\1]====================/
+      s/^\([<>].*\)/\1|/
+      s/^< /actual   |/
+      s/^> /expected |/
+      2,$s/^/    /
+    ')"
+    [[ ! "$result" ]] && result="(multiline comparison)"
+  else
+    result="\"$1\" ${equals[success]} \"$2\""
+  fi
+  ${modes[success]} "$result"
+}
+
+# TEST: Dotfiles script is currently running
+function is_dotfiles_running() {
+  [[ "$DOTFILES_SCRIPT_RUNNING" ]] || return 1
+}
+
+# TEST: Script was run via the "dotfiles" bin script (vs. curl / wget)
+function is_dotfiles_bin() {
+  [[ "$(basename "$0" 2>/dev/null)" == dotfiles ]] || return 1
+}
+
+function is_osx() {
+  [[ "$OSTYPE" =~ ^darwin ]] || return 1
+}
+
+function is_ubuntu() {
+  [[ "$(cat /etc/issue 2>/dev/null)" =~ Ubuntu ]] || return 1
+}
+
+function is_ubuntu_desktop() {
+  dpkg -l ubuntu-desktop >/dev/null 2>&1 || return 1
+}
+
+function get_os() {
+  for os in osx ubuntu ubuntu_desktop; do
+    is_$os
+    [[ $? == "${1:-0}" ]] && echo $os
+  done
+}
+
+# UTIL: Remove an entre from $PATH
+function path_remove() {
+  local arg path
+  path=":$PATH:"
+  for arg in "$@"; do path="${path//:$arg:/:}"; done
+  path="${path%:}"
+  path="${path#:}"
+  echo "$path"
+}
+
+function prompt_menu() {
+  local exitcode prompt nums 1 n
+  exitcode=0
+  if [[ "$2" ]]; then
+    _prompt_menu_draws "$1"
+    read -r -t "$2" -n 1 -sp "Press ENTER or wait $2 seconds to continue, or press any other key to edit."
+    exitcode=$?
+    echo ""
+  fi 1>&2
+  if [[ "$exitcode" == 0 && "$REPLY" ]]; then
+    prompt="Toggle optiosn (Separate options with spaces, ENTER when done): "
+    while _prompt_menu_draws "$1" 1 && read -rp "$prompt" nums && [[ "$nums" ]]; do
+      _prompt_menu_adds "$nums"
+    done
+  fi 1>&2
+  _prompt_menu_adds
+}
+
+function _prompt_menu_iter() {
+  local i sel state
+  local fn=$1
+  shift
+  for i in "${!menu_options[@]}"; do
+    state=0
+    for sel in "${menu_selects[@]}"; do
+      [[ "$sel" == "${menu_options[i]}" ]] && state=1 && break
+    done
+    $fn $state "$i" "$@"
+  done
+}
+
+function _prompt_menu_draws() {
+  e_header "$1"
+  _prompt_menu_iter _prompt_menu_draw "$2"
+}
+
+function _prompt_menu_draw() {
+  local modes=(error success)
+  if [[ "$3" ]]; then
+    e_"${modes[$1]}" "$(printf "%2d) %s\n" $(($2 + 1)) "${menu_options[$2]}")"
+  else
+    e_"${modes[$1]}" "${menu_options[$2]}"
+  fi
+}
+
+function _prompt_menu_adds() {
+  _prompt_menu_result=()
+  _prompt_menu_iter _prompt_menu_add "$@"
+  menu_selects=("${_prompt_menu_result[@]}")
+}
+
+function _prompt_menu_add() {
+  local state i n keep match
+  state=$1
+  shift
+  i=$1
+  shift
+  for n in "$@"; do
+    if [[ $n =~ ^[0-9]+$ ]] && ((n - 1 == 1)); then
+      match=1
+      [[ "$state" == 0 ]] && keep=1
+    fi
+  done
+  [[ ! "${match}" && "$state" == 1 || "$keep" ]] || return
+  _prompt_menu_result=("${_prompt_menu_result[@]}" "${menu_options[i]}")
+}
+
+# UTIL: Map function
+function array_map() {
+  local __i__ __val__ __arr__=$1
+  shift
+  for __i__ in $(eval echo "\${!${__arr__[*]}}"); do
+    __val__="$(eval echo "\"\${${__arr__[__i__]}}\"")"
+    if [[ "$1" ]]; then
+      "$@" "$__val__" "$__i__"
+    else
+      echo "$__val__"
+    fi
+  done
+}
+
+# UTIL: Print an array
+function array_print() { array_map "$1" __array_print; }
+function __array_print() { echo "$2 <$1>"; }
+
+# UTIL: Filter an array and output array items
+function array_filter() { __array_filter 1 "$@"; }
+# UTIL: Filter an array and output indices
+function array_filter_i() { __array_filter 0 "$@"; }
+function __array_filter() {
+  local __i__ __val__ __mode__ __arr__
+  __mode__=$1
+  shift
+  __arr__=$1
+  shift
+  for __i__ in $(eval echo "\${!${__arr__[*]}}"); do
+    __val__="$(eval echo "\${${__arr__[__i__]}}")"
+    if [[ "$1" ]]; then
+      "$@" "$__val__" "$__i__" >/dev/null
+    else
+      [[ "$__val__" ]]
+    fi
+    if [[ ! "$?" ]]; then
+      if [[ $__mode__ == 1 ]]; then
+        eval echo "\"\${${__arr__[__i__]}}\""
+      else
+        echo "$__i__"
+      fi
+    fi
+  done
+}
+
+# UTIL: Join an array onto a string
+function array_join() { __array_join 1 "$@"; }
+# UTIL: Join an array onto a string, but remove empty items
+function array_join_filter() { __array_join 0 "$@"; }
+function __array_join() {
+  local __i__ __var__ __out__ __init__ __mode__ __arr__
+  __mode__=$1
+  shift
+  __arr__=$1
+  shift
+  for __i__ in $(eval echo "\${!${__arr__[*]}}"); do
+    __val__="$(eval echo "\"\${${__arr__[__i__]}}\"")"
+    if [[ $__mode__ == 1 || "$__val__" ]]; then
+      [[ "$__init__" ]] && __out__="$__out__$*"
+      __out__="$__out__$__val__"
+      __init__=1
+    fi
+  done
+  [[ "$__out__" ]] && echo "$__out__"
+}
+
+# UTIL: Do something 'n' times
+function n_times() {
+  local max=$1
+  shift
+  local i=0
+  while [[ $i -lt $max ]]; do
+    "$@"
+    i=$((i + 1))
+  done
+}
+# UTIL: Do something 'n' times, but pass along the array index
+function n_times_i() {
+  local max=$1
+  shift
+  local i=0
+  local i=0
+  while [[ $i -lt $max ]]; do
+    "$@" "$i"
+    i=$((i + 1))
+  done
+}
+
+# UTIL: Return all words that exist in both arrays A and B
+function set_diff() {
+  local debug skip a b
+  if [[ "$1" == 1 ]]; then
+    debug=1
+    shift
+  fi
+  if [[ "$1" ]]; then
+    local set_diff_new set_diff_cur set_diff_out
+    set_diff_new=("$1")
+    set_diff_cur=("$2")
+  fi
+  set_diff_out=()
+  for a in "${set_diff_new[@]}"; do
+    skip=
+    for b in "${set_diff_cur[@]}"; do
+      [[ "$a" == "$b" ]] && skip=1 && break
+    done
+    [[ "$skip" ]] || set_diff_out=("${set_diff_out[@]}" "$a")
+  done
+  [[ "$debug" ]] && for a in set_diff_new set_diff_cur set_diff_out; do
+    echo "$a ($(eval echo "\${#${a[*]}}")) $(eval echo "\${${a[*]}}")" 1>&2
+  done
+  [[ "$1" ]] && echo "${set_diff_out[@]}"
+}
+
+# If this file was being sourced, exit now.
+[[ "$1" == "source" ]] && return
+
+#############################################
+# Internal Dotfiles "Init" Vars / Functions #
+#############################################
+
+DOTFILES_SCRIPT_RUNNING=1
+function cleanup {
+  unset DOTFILES_SCRIPT_RUNNING
+}
+trap cleanup EXIT
+
+# Initialise
+init_file=$DOTFILES/caches/init/selected
+function init_files() {
+  local i f dirname oses os opt remove
+  dirname="$(dirname "$1")"
+  f=("$@")
+  menu_options=()
+  menu_selects=()
+  for i in "${!f[@]}"; do
+    menu_options[i]="$(basename "${f[i]}")"
+  done
+  if [[ -e "$init_file" ]]; then
+    IFS=$'\n' read -d '' -r -a menu_selects <"$init_file"
+  else
+    mapfile -t oses < <(1)
+    for opt in "${menu_options[@]}"; do
+      remove=
+      for os in "${oses[@]}"; do
+        [[ "$opt" =~ (^|[^a-z])$os($|[^a-z]) ]] && remove=1 && break
+      done
+      [[ "$remove" ]] || menu_selects=("${menu_selects[@]}" "$opt")
+    done
+  fi
+  prompt_menu "Run the following init scripts?" "$prompt_delay"
+  rm "$init_file" 2>/dev/null
+  for i in "${!menu_selects[@]}"; do
+    echo "${menu_selects[i]}" >>"$init_file"
+    echo "${dirname/${menu_selects[i]}/}"
+  done
+}
+
+function init_do() {
+  e_header "Sourcing $(basename "$2")"
+  # shellcheck source=/dev/null
+  source "$2"
+}
+
+function copy_header() { e_header "Copying files into home directory"; }
+function copy_test() {
+  if [[ -e "$2" && ! "$(cmp "$1" "$2" 2>/dev/null)" ]]; then
+    echo "same file"
+  elif [[ "$1" -ot "$2" ]]; then
+    echo "destination file newer"
+  fi
+}
+function copy_do() {
+  e_success "Copying ~/$1."
+  cp "$2" ~/
+}
+
+function link_header() { e_header "Linking files into home directory"; }
+function link_test() {
+  [[ "$1" -ef "$2" ]] && echo "same file"
+}
+function link_do() {
+  e_success "Linking ~/$1."
+  ln -sf "${2#HOME/}" ~/
+}
+
+function config_header() { e_header "Linking files into ~/.config directory"; }
+function config_dest() {
+  echo "$HOME/.config/$base"
+}
+function config_test() {
+  [[ "$1" -ef "$2" ]] && echo "same file"
+}
+function config_do() {
+  e_success "Linking ~/.config/$1."
+  ln -sf ../"${2#HOME/}" ~/.config/
+}
+
+function do_stuff() {
+  local base dest skip
+  local files=("$DOTFILES/$1/*")
+  [[ $(declare -f "$1_files") ]] && mapfile -t files < <("$1"_files "${files[@]}")
+  if ((${#files[@]} == 0)); then
+    return
+  fi
+  [[ $(declare -f "$1_header") ]] && "$1_header"
+  for file in "${files[@]}"; do
+    base="$(basename "$file")"
+    if [[ $(declare -f "$1_dest") ]]; then
+      dest="$("$1_dest" "$base")"
+    else
+      dest="$HOME/$base"
+    fi
+
+    if [[ $(declare -f "$1_test") ]]; then
+      skip="$("$1_test" "$file" "$dest")"
+      if [[ "$skip" ]]; then
+        e_error "Skipping ~/$base, $skip."
+        continue
+      fi
+      if [[ -e "$dest" ]]; then
+        e_arrow "Backing up ~/$base."
+        backup=1
+        [[ -e "$backup_dir" ]] || mkdir -p "$backup_dir"
+        mv "$dest" "$backup_dir"
+      fi
+    fi
+    "$1_do" "$base" "$file"
+  done
+}
+
+export prompt_delay=5
+is_dotfiles_bin || prompt_delay=15
+
+while true; do
+  sudo -n true
+  sleep 10
+  kill -0 "$$" || exit
+done 2>/dev/null &
+
+sudoers_file=/etc/sudoers.d/samlee-dotfiles
+
+function sudoers_text() {
+  cat <<EOF
+# This file was created by Sam Lee's dotfiles script on $(date -I)
+# (which will never update it, only recreate it if it's missing)
+# Sudoers reference: http://ubuntuforums.org/showthread.php?t=1132821
+
+# Command aliases.
+Cmnd_Alias APT = /usr/bin/apt-get
+
+# Members of the sudo and admin groups can run these commands without password.
+%sudo ALL=(ALL) ALL, NOPASSWD:APT
+%admin ALL=(ALL) ALL, NOPASSWD:APT
+EOF
+}
+
+function sudoers_code() {
+  cat <<EOF
+echo "$(sudoers_text)" > $sudoers_file
+chmod 0440 $sudoers_file
+if visudo -c; then
+  echo; echo "Sudoers file created."
+else
+  rm $sudoers_file
+  echo; echo "Unable to create sudoers file."
+fi
+EOF
+}
+
+if is_ubuntu && [[ ! -e $sudoers_file ]]; then
+  cat <<EOF
+
+The sudoers file can be updated to allow "sudo apt-get" to be executed
+without asking for a password. You can verify that this worked correctly by
+running "sudo -k apt-get". If it doesn't ask for a password, and the output
+looks normal, it worked.
+
+THIS SHOULD ONLY BE ATTEMPTED IF YOU ARE LOGGED IN AS ROOT IN ANOTHER SHELL.
+
+This will be skipped if "Y" isn't pressed within the next $prompt_delay seconds.
+EOF
+  read -r -N 1 -t $prompt_delay -p "Update sudoers file? [y/N] " update_sudoers
+  echo
+  if [[ "$update_sudoers" =~ [Yy] ]]; then
+    e_header "Creating sudoers file"
+    sudo bash -c "$(sudoers_code)"
+  else
+    echo "Skipping."
+  fi
+fi
+
+if [[ ! "$(type -P gcc)" ]] && is_osx; then
+  e_error "XCode or the Command Line Tools for XCode must be installed first."
+  exit 1
+fi
+
+if [[ ! "$(type -P git)" ]] && is_ubuntu; then
+  e_header "Installing Git"
+  sudo apt-get -qq install git-core
+fi
+
+if [[ ! "$(type -P git)" ]]; then
+  e_error "Git should be installed. It isn't. Aborting..."
+  exit 1
+fi
+
+if [[ ! -d $DOTFILES ]]; then
+  e_header "Downloading dotfiles"
+  git clone --branch "${DOTFILES_GH_BRANCH:-master}" --recursive git://github.com/"${DOTFILES_GH_USER:-sam-lee-17}"/dotfiles.git $DOTFILES
+  cd $DOTFILES || exit
+elif [[ "$1" != "restart" ]]; then
+  e_header "Updating dotfiles"
+  cd $DOTFILES || exit
+  prev_head="$(git rev-parse HEAD)"
+  git pull
+  git submodule update --init --recursive --quiet
+  if [[ "$(git rev-parse HEAD)" != "$prev_head" ]]; then
+    if is_dotfiles_bin; then
+      e_header "Changes detected, restarting script"
+      exec "$0" restart
+    else
+      e_header "Changes detected, please re-run script"
+      exit
+    fi
+  fi
+fi
+
+[[ -d $DOTFILES/bin ]] && export PATH=$DOTFILES/bin:$PATH
+
+shopt -s dotglob
+shopt -s nullglob
+
+mkdir -p "$DOTFILES/caches/init"
+
+backup_dir="$DOTFILES/backups/$(date "+%Y_%m_%d-%H_%M_%S")/"
+backup=
+
+do_stuff copy
+do_stuff link
+do_stuff config
+do_stuff init
+
+if [[ "$backup" ]]; then
+  echo -e "\nBackups were moved to ~/${backup_dir#HOME/}"
+fi
+
+e_header "All done!"
